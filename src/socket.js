@@ -29,6 +29,7 @@ let requestId = 0;
 class Request {
   constructor() {
     this.id = requestId++;
+    this.guid = null;
     this.srcFile = null;
     this.dstFile = null;
     this.fileSize = null;
@@ -70,6 +71,10 @@ class Session {
       unpackedObject.objectGUID,
       'http://yearbook.prod.hulu.com/api/person/'+ unpackedObject.username +'/picture.jpg?type=profile');
   }
+
+  getUserId() {
+    return this.userProfile.userGuid;
+  }
 }
 
 function createSession(cookies) {
@@ -84,8 +89,9 @@ function createSession(cookies) {
 class SocketApp {
   constructor(ioServer) {
     this.cmdHandler = {
-      'cmd_ls': this.lsHandler.bind(this),
-      'send': this.sendHandler.bind(this)
+      'cmd_ls': this.listUserHandler.bind(this),
+      'cmd_send_file': this.sendFileHandler.bind(this),
+      'cmd_receive_file': this.receiveFileHandler.bind(this)
     };
 
     this.ioServer = ioServer;
@@ -96,9 +102,10 @@ class SocketApp {
     logger.info('a user connected!');
     this.hookEvents(clientSocket);
     this.authClient(clientSocket);
+    clientMap.set(clientSocket, clientSocket.session.getUserId());
   }
 
-  lsHandler(socket, cmd, args, cb) {
+  listUserHandler(socket, cmd, args, cb) {
     let clientNames = [];
 
     _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
@@ -109,26 +116,45 @@ class SocketApp {
     cb(null, clientNames);
   }
 
-  sendHandler(socket, cmd, args, cb) {
-    let [user, file, fileSize] = args;
-    let userSocket = null;
-    this.ioServer.sockets.sockets.forEach((socket) => {
+  sendFileHandler(socket, cmd, args, cb) {
+    let [user, file, fileSize, guid] = args;
+    let dstClientSocket = null;
+    _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
       if (clientMap.get(socket) === user) {
-        userSocket = socket;
+        dstClientSocket = socket;
       }
     });
-    if (userSocket === null) {
+
+    if (dstClientSocket === null) {
       cb(null, 'no such user.');
     } else {
       let req = new Request();
       req.srcFile = file;
       req.fileSize = fileSize;
+      req.guid = guid;
       req.srcClient = socket;
-      req.dstClient = userSocket;
-      pendingRequests[req.id] = req;
-      userSocket.emit('request_file', {file, id: req.id});
-      cb(null, 'request sent.');
+      req.dstClient = dstClientSocket;
+      pendingRequests[guid] = req;
+      dstClientSocket.emit('ev_receive_file', {guid: guid});
+      cb(null, 'file send request is sent.');
     }
+  }
+
+  receiveFileHandler(socket, cmd, args, cb) {
+    let [user, guid] = args;
+    let srcClientSocket = null;
+    _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
+      if (clientMap.get(socket) === user) {
+        srcClientSocket = socket;
+      }
+    });
+
+    if (srcClientSocket === null) {
+      cb(null, 'no such user.');
+    } else {
+      srcClientSocket.emit('ev_send_file', {guid: guid});
+      cb(null, 'confirmed to receive file.');
+    } 
   }
 
   processCommand(socket, cmd, args, callback) {
@@ -168,7 +194,7 @@ class SocketApp {
 
     clientSocketStream.on('file_data', (readStream, data) => {
       logger.info('piping data...');
-      let req = pendingRequests[data.id];
+      let req = pendingRequests[data.guid];
       let pgStream = progress({
         length: req.fileSize,
         time: 1000
@@ -188,24 +214,24 @@ class SocketApp {
 
     clientSocket.on('accept', (data) => {
       logger.info('accepted, save to: ' + data.file);
-      let id = data.id;
-      let req = pendingRequests[id];
+      let guid = data.guid;
+      let req = pendingRequests[guid];
       req.dstFile = data.file;
       req.srcClient.emit('send_file', {file: req.srcFile, id: id});
     });
 
     clientSocket.on('receive_done', (data) => {
-      let req = pendingRequests[data.id];
+      let req = pendingRequests[data.guid];
       req.dstClient.emit('ready', {message: 'transfer finished!'});
       req.srcClient.emit('ready', {message: 'transfer finished!'});
-      delete pendingRequests[data.id];
+      delete pendingRequests[data.guid];
     });
 
     clientSocket.on('deny', (data) => {
       logger.info('denied.');
       clientSocket.emit('ev_ready', {message: 'request denied.'});
-      pendingRequests[data.id].srcClient.emit('ready', {message: 'request denied.'});
-      delete pendingRequests[data.id];
+      pendingRequests[data.guid].srcClient.emit('ready', {message: 'request denied.'});
+      delete pendingRequests[data.guid];
     });
   }
 

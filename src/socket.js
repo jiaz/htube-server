@@ -84,7 +84,7 @@ function createSession(cookies) {
 class SocketApp {
   constructor(ioServer) {
     this.cmdHandler = {
-      'ls': this.lsHandler.bind(this),
+      'cmd_ls': this.lsHandler.bind(this),
       'send': this.sendHandler.bind(this)
     };
 
@@ -100,10 +100,12 @@ class SocketApp {
 
   lsHandler(socket, cmd, args, cb) {
     let clientNames = [];
+
     _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
+      console.log(id);
       clientNames.push(socket.session.userProfile);
     });
-    
+
     cb(null, clientNames);
   }
 
@@ -138,25 +140,32 @@ class SocketApp {
     }
   }
 
+  announceUserLogin(session) {
+    this.ioServer.emit('ev_user_connected');
+  }
+
+  announceUserLogout(session) {
+    this.ioServer.emit('ev_user_disconnected');
+  }
+
   authClient(socket) {
     let cookie = socket.request.headers.cookie;
-    console.log('auth client cookies');
-    console.log(socket.request.headers);
     if (!cookie) {
-      socket.emit('auth_required');
+      socket.emit('ev_auth_required');
     } else {
       let session = createSession(cookie);
       socket.session = session;
-      socket.emit('hello', {
+      socket.emit('ev_hello', {
         message: 'welcome to hfserver.',
         session: session
       });
+      this.announceUserLogin(session);
     }
   }
 
-  hookEvents(clientSocket) {
-    let clientSocketStream;
-    clientSocketStream = socketStream(clientSocket);
+  handleFileStreaming(clientSocket) {
+    let clientSocketStream = socketStream(clientSocket);
+
     clientSocketStream.on('file_data', (readStream, data) => {
       logger.info('piping data...');
       let req = pendingRequests[data.id];
@@ -177,17 +186,6 @@ class SocketApp {
       readStream.pipe(pgStream).pipe(writeStream);
     });
 
-    clientSocket.on('disconnect', function () {
-      logger.info('user disconnected.');
-    });
-
-    clientSocket.on('cmd', (data) => {
-      logger.info(`get a cmd: ${data.cmd} [${data.seqId}] with args ${data.args}`);
-      this.processCommand(clientSocket, data.cmd, data.args, (err, res) => {
-        clientSocket.emit('ready', {seqId: data.seqId, error: err, response: res});
-      });
-    });
-
     clientSocket.on('accept', (data) => {
       logger.info('accepted, save to: ' + data.file);
       let id = data.id;
@@ -205,10 +203,26 @@ class SocketApp {
 
     clientSocket.on('deny', (data) => {
       logger.info('denied.');
-      clientSocket.emit('ready', {message: 'request denied.'});
+      clientSocket.emit('ev_ready', {message: 'request denied.'});
       pendingRequests[data.id].srcClient.emit('ready', {message: 'request denied.'});
       delete pendingRequests[data.id];
     });
+  }
+
+  hookEvents(clientSocket) {
+    clientSocket.on('disconnect', () => {
+      logger.info('user disconnected.');
+      this.announceUserLogout(clientSocket.session);
+    });
+
+    clientSocket.on('cmd', (data) => {
+      logger.info(`get a cmd: ${data.cmd} [${data.seqId}] with args ${data.args}`);
+      this.processCommand(clientSocket, data.cmd, data.args, (err, res) => {
+        clientSocket.emit('ev_ready', {seqId: data.seqId, error: err, response: res});
+      });
+    });
+
+    this.handleFileStreaming(clientSocket);
   }
 }
 

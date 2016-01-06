@@ -1,0 +1,8 @@
+.tern-project
+
+node_modules/
+node_modules_fixed/
+
+.idea/
+
+*.iml

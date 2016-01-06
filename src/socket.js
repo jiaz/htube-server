@@ -102,12 +102,9 @@ class SocketApp {
     let clientNames = [];
     _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
       clientNames.push(socket.session.userProfile);
-      cb(null, clientNames);
     });
-    // this.ioServer.sockets.sockets.forEach((socket) => {
-    //   clientNames.push(socket.session.userProfile);
-    // });
-    // cb(null, clientNames);
+    
+    cb(null, clientNames);
   }
 
   sendHandler(socket, cmd, args, cb) {

@@ -192,22 +192,19 @@ class SocketApp {
   handleFileStreaming(clientSocket) {
     let clientSocketStream = socketStream(clientSocket);
 
-    clientSocketStream.on('file_data', (readStream, data) => {
-      logger.info('piping data...');
-      let req = pendingRequests[data.guid];
+    clientSocketStream.on('ev_ss_send_file', (readStream, params) => {
+      logger.info('socket stream sending data...: ' + JSON.stringify(params));
+      let req = pendingRequests[params.guid];
       let pgStream = progress({
         length: req.fileSize,
         time: 1000
       });
       let writeStream = socketStream.createStream();
-      socketStream(req.dstClient).emit('receive_file',
-        writeStream,
-        {file: req.dstFile, id: req.id}
-      );
+      socketStream(req.dstClient).emit('ev_ss_receive_file', writeStream, params);
       pgStream.on('progress', p => {
         logger.info('progress: ' + JSON.stringify(pgStream.progress()));
-        req.dstClient.emit('progress', {percentage: p.percentage});
-        req.srcClient.emit('progress', {percentage: p.percentage});
+        // req.dstClient.emit('progress', {percentage: p.percentage});
+        // req.srcClient.emit('progress', {percentage: p.percentage});
       });
       readStream.pipe(pgStream).pipe(writeStream);
     });

@@ -200,14 +200,15 @@ class SocketApp {
     clientSocketStream.on('ev_ss_send_file', (readStream, params) => {
       logger.info('socket stream sending data...: ' + JSON.stringify(params));
       let req = pendingRequests[params.guid];
-      let pgStream = progress({
-        length: req.fileSize,
-        time: 1000
-      });
+      
+      let pgStream = progress({length: req.fileSize, time: 500});
+      
       let writeStream = socketStream.createStream();
       socketStream(req.dstClient).emit('ev_ss_receive_file', writeStream, params);
+      
       req.srcClient.emit('ev_progress_start', {guid: req.guid, isSender: true});
       req.dstClient.emit('ev_progress_start', {guid: req.guid, isSender: false});
+
       pgStream.on('progress', p => {
         logger.info('progress: ' + JSON.stringify(pgStream.progress()));
         req.srcClient.emit('ev_progress_update', {
@@ -229,29 +230,14 @@ class SocketApp {
                                                   isSender: false
                                                 });
       });
+
+      pgStream.on('end', () => {
+        req.dstClient.emit('ev_progress_end', {guid: req.guid, isSender: true});
+        req.srcClient.emit('ev_progress_end', {guid: req.guid, isSender: false});
+        delete pendingRequests[req.guid];
+      });
+
       readStream.pipe(pgStream).pipe(writeStream);
-    });
-
-    clientSocket.on('accept', (data) => {
-      logger.info('accepted, save to: ' + data.file);
-      let guid = data.guid;
-      let req = pendingRequests[guid];
-      req.dstFile = data.file;
-      req.srcClient.emit('send_file', {file: req.srcFile, id: id});
-    });
-
-    clientSocket.on('receive_done', (data) => {
-      let req = pendingRequests[data.guid];
-      req.dstClient.emit('ev_progress_end', {guid: req.guid, isSender: true});
-      req.srcClient.emit('ev_progress_end', {guid: req.guid, isSender: false});
-      delete pendingRequests[data.guid];
-    });
-
-    clientSocket.on('deny', (data) => {
-      logger.info('denied.');
-      clientSocket.emit('ev_ready', {message: 'request denied.'});
-      pendingRequests[data.guid].srcClient.emit('ready', {message: 'request denied.'});
-      delete pendingRequests[data.guid];
     });
   }
 

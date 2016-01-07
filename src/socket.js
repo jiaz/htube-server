@@ -135,7 +135,7 @@ class SocketApp {
       req.srcClient = socket;
       req.dstClient = dstClientSocket;
       pendingRequests[guid] = req;
-      dstClientSocket.emit('ev_receive_file', {guid: guid});
+      dstClientSocket.emit('ev_receive_file', {user, file, fileSize, guid});
       cb(null, 'file send request is sent.');
     }
   }

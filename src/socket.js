@@ -102,7 +102,9 @@ class SocketApp {
     logger.info('a user connected!');
     this.hookEvents(clientSocket);
     this.authClient(clientSocket);
-    clientMap.set(clientSocket, clientSocket.session.getUserId());
+    if (clientSocket.session) {
+      clientMap.set(clientSocket, clientSocket.session.getUserId());
+    }
   }
 
   listUserHandler(socket, cmd, args, cb) {
@@ -110,18 +112,20 @@ class SocketApp {
 
     _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
       console.log(id);
-      clientNames.push(socket.session.userProfile);
+      if (socket.session) {
+        clientNames.push(socket.session.userProfile);
+      }
     });
 
     cb(null, clientNames);
   }
 
   sendFileHandler(socket, cmd, args, cb) {
-    let [user, file, fileSize, guid] = args;
+    let [receiver, file, fileSize, guid] = args;
     let dstClientSocket = null;
-    _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
-      if (clientMap.get(socket) === user) {
-        dstClientSocket = socket;
+    _.forEach(this.ioServer.sockets.sockets, function(s, id) {
+      if (clientMap.get(s) === receiver) {
+        dstClientSocket = s;
       }
     });
 
@@ -135,16 +139,17 @@ class SocketApp {
       req.srcClient = socket;
       req.dstClient = dstClientSocket;
       pendingRequests[guid] = req;
-      dstClientSocket.emit('ev_receive_file', {user, file, fileSize, guid});
+      let sender = clientMap.get(socket);
+      dstClientSocket.emit('ev_receive_file', {sender, file, fileSize, guid});
       cb(null, 'file send request is sent.');
     }
   }
 
   receiveFileHandler(socket, cmd, args, cb) {
-    let [user, guid] = args;
+    let [sender, guid] = args;
     let srcClientSocket = null;
     _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
-      if (clientMap.get(socket) === user) {
+      if (clientMap.get(socket) === sender) {
         srcClientSocket = socket;
       }
     });
@@ -201,10 +206,28 @@ class SocketApp {
       });
       let writeStream = socketStream.createStream();
       socketStream(req.dstClient).emit('ev_ss_receive_file', writeStream, params);
+      req.srcClient.emit('ev_progress_start', {guid: req.guid, isSender: true});
+      req.dstClient.emit('ev_progress_start', {guid: req.guid, isSender: false});
       pgStream.on('progress', p => {
         logger.info('progress: ' + JSON.stringify(pgStream.progress()));
-        // req.dstClient.emit('progress', {percentage: p.percentage});
-        // req.srcClient.emit('progress', {percentage: p.percentage});
+        req.srcClient.emit('ev_progress_update', {
+                                                  guid: req.guid,
+                                                  percentage: p.percentage,
+                                                  total_size: p.length,
+                                                  current_size: p.transferred,
+                                                  transfer_rate: p.speed,
+                                                  eta: p.eta,
+                                                  isSender: true
+                                                });
+        req.dstClient.emit('ev_progress_update', {
+                                                  guid: req.guid,
+                                                  percentage: p.percentage,
+                                                  total_size: p.length,
+                                                  current_size: p.transferred,
+                                                  transfer_rate: p.speed,
+                                                  eta: p.eta,
+                                                  isSender: false
+                                                });
       });
       readStream.pipe(pgStream).pipe(writeStream);
     });
@@ -219,8 +242,8 @@ class SocketApp {
 
     clientSocket.on('receive_done', (data) => {
       let req = pendingRequests[data.guid];
-      req.dstClient.emit('ready', {message: 'transfer finished!'});
-      req.srcClient.emit('ready', {message: 'transfer finished!'});
+      req.dstClient.emit('ev_progress_end', {guid: req.guid, isSender: true});
+      req.srcClient.emit('ev_progress_end', {guid: req.guid, isSender: false});
       delete pendingRequests[data.guid];
     });
 

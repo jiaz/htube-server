@@ -8,6 +8,7 @@ import zlib from 'zlib';
 import URLSafeBase64 from 'urlsafe-base64';
 import socketStream from 'socket.io-stream';
 import progress from 'progress-stream';
+import ipaddr from 'ipaddr.js';
 
 import logger from './logger';
 
@@ -48,7 +49,7 @@ class UserProfile {
 }
 
 class Session {
-  constructor(ssoData, ssoSig) {
+  constructor(socket, ssoData, ssoSig) {
     this.ssoData = ssoData;
     this.ssoSig = ssoSig;
 
@@ -70,28 +71,52 @@ class Session {
       unpackedObject.last_name,
       unpackedObject.objectGUID,
       'http://yearbook.prod.hulu.com/api/person/'+ unpackedObject.username +'/picture.jpg?type=profile');
+
+    this.socket = socket;
+    this.p2pPort = null;
   }
 
   getUserId() {
     return this.userProfile.userGuid;
   }
+
+  getP2PServiceUri() {
+    if (!this.p2pPort) {
+      return null;
+    }
+    let address = this.socket.conn.remoteAddress;
+    if (ipaddr.IPv6.isValid(address)) {
+      let ip = ipaddr.IPv6.parse(address);
+      if (ip.isIPv4MappedAddress()) {
+        address = ip.toIPv4Address().toString();
+      }
+    }
+    return 'ws://' + address + ':' + this.p2pPort;
+  }
 }
 
-function createSession(cookies) {
+function createSession(cookies, socket) {
   const parsedCookie = cookie.parse(cookies);
   logger.info('cookie %j', parsedCookie);
   logger.info('sso_data: %s, sso_sig: %s', parsedCookie.hulu_sso_data, parsedCookie.hulu_sso_sig);
   const ssoData = parsedCookie.hulu_sso_data;
   const ssoSig = parsedCookie.hulu_sso_sig;
-  return new Session(ssoData, ssoSig);
+
+  var session = new Session(socket, ssoData, ssoSig);
+
+  clientMap.set(socket, session);
+
+  return session;
 }
 
 class SocketApp {
   constructor(ioServer) {
     this.cmdHandler = {
       'cmd_ls': this.listUserHandler.bind(this),
+      'cmd_register': this.registerHandler.bind(this),
       'cmd_send_file': this.sendFileHandler.bind(this),
-      'cmd_receive_file': this.receiveFileHandler.bind(this)
+      'cmd_receive_file': this.receiveFileHandler.bind(this),
+      'cmd_complete_request': this.completeRequestHandler.bind(this),
     };
 
     this.ioServer = ioServer;
@@ -101,30 +126,63 @@ class SocketApp {
   onNewConnection(clientSocket) {
     logger.info('a user connected!');
     this.hookEvents(clientSocket);
-    this.authClient(clientSocket);
-    if (clientSocket.session) {
-      clientMap.set(clientSocket, clientSocket.session.getUserId());
+  }
+
+  authClient(socket) {
+    let cookie = socket.request.headers.cookie;
+    if (!cookie) {
+      socket.emit('ev_auth_failed');
+      return false;
+    } else {
+      let session = null;
+      try {
+        session = createSession(cookie, socket);
+        socket.emit('ev_hello', {
+          message: 'welcome to htube.',
+          profile: session.userProfile
+        });
+        this.announceUserLogin(session);
+      } catch (err) {
+        socket.emit('ev_auth_failed');
+        return false;
+      }
+    }
+    return true;
+  }
+
+  registerHandler(socket, cmd, args, cb) {
+    if (this.authClient(socket)) {
+      let [port] = args;
+      let session = clientMap.get(socket);
+      session.p2pPort = port;
+      cb(null, 'register succeeded! ' + session.getP2PServiceUri());
+    } else {
+      cb(null, 'register failed!');
     }
   }
 
   listUserHandler(socket, cmd, args, cb) {
-    let clientNames = [];
+    let clients = [];
 
     _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
       console.log(id);
-      if (socket.session) {
-        clientNames.push(socket.session.userProfile);
+      let session = clientMap.get(socket);
+      if (session) {
+        clients.push({
+          profile: session.userProfile,
+          p2pUri: session.getP2PServiceUri(),
+        });
       }
     });
 
-    cb(null, clientNames);
+    cb(null, clients);
   }
 
   sendFileHandler(socket, cmd, args, cb) {
     let [receiver, file, fileSize, guid] = args;
     let dstClientSocket = null;
     _.forEach(this.ioServer.sockets.sockets, function(s, id) {
-      if (clientMap.get(s) === receiver) {
+      if (clientMap.get(s).getUserId() === receiver) {
         dstClientSocket = s;
       }
     });
@@ -139,17 +197,17 @@ class SocketApp {
       req.srcClient = socket;
       req.dstClient = dstClientSocket;
       pendingRequests[guid] = req;
-      let sender = clientMap.get(socket);
+      let sender = clientMap.get(socket).getUserId();
       dstClientSocket.emit('ev_receive_file', {sender, file, fileSize, guid});
       cb(null, 'file send request is sent.');
     }
   }
 
   receiveFileHandler(socket, cmd, args, cb) {
-    let [sender, guid] = args;
+    let [sender, guid, isP2P] = args;
     let srcClientSocket = null;
     _.forEach(this.ioServer.sockets.sockets, function(socket, id) {
-      if (clientMap.get(socket) === sender) {
+      if (clientMap.get(socket).getUserId() === sender) {
         srcClientSocket = socket;
       }
     });
@@ -157,9 +215,16 @@ class SocketApp {
     if (srcClientSocket === null) {
       cb(null, 'no such user.');
     } else {
-      srcClientSocket.emit('ev_send_file', {guid: guid});
+      srcClientSocket.emit('ev_send_file', {guid: guid, isP2P: isP2P});
       cb(null, 'confirmed to receive file.');
     } 
+  }
+
+  completeRequestHandler(socket, cmd, args, cb) {
+    let [guid] = args;
+    logger.info('request: ' + guid + ' completed!');
+    delete pendingRequests[guid];
+    cb(null, 'request completed');
   }
 
   processCommand(socket, cmd, args, callback) {
@@ -179,21 +244,6 @@ class SocketApp {
     this.ioServer.emit('ev_user_disconnected');
   }
 
-  authClient(socket) {
-    let cookie = socket.request.headers.cookie;
-    if (!cookie) {
-      socket.emit('ev_auth_required');
-    } else {
-      let session = createSession(cookie);
-      socket.session = session;
-      socket.emit('ev_hello', {
-        message: 'welcome to hfserver.',
-        session: session
-      });
-      this.announceUserLogin(session);
-    }
-  }
-
   handleFileStreaming(clientSocket) {
     let clientSocketStream = socketStream(clientSocket);
 
@@ -201,43 +251,9 @@ class SocketApp {
       logger.info('socket stream sending data...: ' + JSON.stringify(params));
       let req = pendingRequests[params.guid];
       
-      let pgStream = progress({length: req.fileSize, time: 500});
-      
       let writeStream = socketStream.createStream();
       socketStream(req.dstClient).emit('ev_ss_receive_file', writeStream, params);
-      
-      req.srcClient.emit('ev_progress_start', {guid: req.guid, isSender: true});
-      req.dstClient.emit('ev_progress_start', {guid: req.guid, isSender: false});
-
-      pgStream.on('progress', p => {
-        logger.info('progress: ' + JSON.stringify(pgStream.progress()));
-        req.srcClient.emit('ev_progress_update', {
-                                                  guid: req.guid,
-                                                  percentage: p.percentage,
-                                                  total_size: p.length,
-                                                  current_size: p.transferred,
-                                                  transfer_rate: p.speed,
-                                                  eta: p.eta,
-                                                  isSender: true
-                                                });
-        req.dstClient.emit('ev_progress_update', {
-                                                  guid: req.guid,
-                                                  percentage: p.percentage,
-                                                  total_size: p.length,
-                                                  current_size: p.transferred,
-                                                  transfer_rate: p.speed,
-                                                  eta: p.eta,
-                                                  isSender: false
-                                                });
-      });
-
-      pgStream.on('end', () => {
-        req.dstClient.emit('ev_progress_end', {guid: req.guid, isSender: true});
-        req.srcClient.emit('ev_progress_end', {guid: req.guid, isSender: false});
-        delete pendingRequests[req.guid];
-      });
-
-      readStream.pipe(pgStream).pipe(writeStream);
+      readStream.pipe(writeStream);
     });
   }
 

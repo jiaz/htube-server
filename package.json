@@ -20,6 +20,8 @@
     "cookie": "^0.2.3",
     "cookie-parser": "^1.4.0",
     "express": "^4.13.3",
+    "ipaddr": "0.0.8",
+    "ipaddr.js": "^1.0.5",
     "lodash": "^3.10.1",
     "progress-stream": "^1.1.1",
     "socket.io": "git+https://github.com/socketio/socket.io.git",
